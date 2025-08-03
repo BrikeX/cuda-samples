@@ -1,6 +1,8 @@
 build
 .vs
-.clangd
+# .clangd
 test
 settings.json
 launch.json
+.cache/
+compile_commands.json
