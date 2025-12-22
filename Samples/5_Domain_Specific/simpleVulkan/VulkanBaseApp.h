@@ -107,7 +107,8 @@ protected:
     std::vector<VkFence>                                       m_inFlightFences;
     std::vector<VkBuffer>                                      m_uniformBuffers;
     std::vector<VkDeviceMemory>                                m_uniformMemory;
-    VkSemaphore                                                m_vkPresentationSemaphore;
+    std::vector<VkSemaphore>                                   m_vkImageAcquiredSemaphores;
+    std::vector<VkSemaphore>                                   m_vkRenderCompleteSemaphores;
     VkSemaphore                                                m_vkTimelineSemaphore;
     VkDescriptorSetLayout                                      m_descriptorSetLayout;
     VkDescriptorPool                                           m_descriptorPool;

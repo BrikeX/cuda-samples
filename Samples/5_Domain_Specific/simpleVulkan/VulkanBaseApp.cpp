@@ -144,8 +144,9 @@ VulkanBaseApp::~VulkanBaseApp()
     }
 
 #ifdef _VK_TIMELINE_SEMAPHORE
-    if (m_vkPresentationSemaphore != VK_NULL_HANDLE) {
-        vkDestroySemaphore(m_device, m_vkPresentationSemaphore, nullptr);
+    for (size_t i = 0; i < m_vkImageAcquiredSemaphores.size(); i++) {
+        vkDestroySemaphore(m_device, m_vkImageAcquiredSemaphores[i], nullptr);
+        vkDestroySemaphore(m_device, m_vkRenderCompleteSemaphores[i], nullptr);
     }
 #endif /* _VK_TIMELINE_SEMAPHORE */
 
@@ -1351,8 +1352,15 @@ void VulkanBaseApp::createSyncObjects()
     }
 
 #ifdef _VK_TIMELINE_SEMAPHORE
-    if (vkCreateSemaphore(m_device, &semaphoreInfo, nullptr, &m_vkPresentationSemaphore) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create binary semaphore!");
+    m_vkImageAcquiredSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+    m_vkRenderCompleteSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        if (vkCreateSemaphore(m_device, &semaphoreInfo, nullptr, &m_vkImageAcquiredSemaphores[i]) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create image acquired semaphore!");
+        }
+        if (vkCreateSemaphore(m_device, &semaphoreInfo, nullptr, &m_vkRenderCompleteSemaphores[i]) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create render complete semaphore!");
+        }
     }
 #endif /* _VK_TIMELINE_SEMAPHORE */
 }
@@ -1634,6 +1642,12 @@ void VulkanBaseApp::drawFrame()
     static uint64_t waitValue   = 0;
     static uint64_t signalValue = 1;
 
+    size_t currentFrameIdx = m_currentFrame % MAX_FRAMES_IN_FLIGHT;
+
+    // Wait for this frame's fence to avoid VUID-vkAcquireNextImageKHR-semaphore-01779
+    // Ensures previous frame's GPU work completes before reusing per-frame semaphores
+    vkWaitForFences(m_device, 1, &m_inFlightFences[currentFrameIdx], VK_TRUE, std::numeric_limits<uint64_t>::max());
+
     VkSemaphoreWaitInfo semaphoreWaitInfo = {};
     semaphoreWaitInfo.sType               = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
     semaphoreWaitInfo.pSemaphores         = &m_vkTimelineSemaphore;
@@ -1641,19 +1655,25 @@ void VulkanBaseApp::drawFrame()
     semaphoreWaitInfo.pValues             = &waitValue;
     vkWaitSemaphores(m_device, &semaphoreWaitInfo, std::numeric_limits<uint64_t>::max());
 
+    // Use separate binary semaphores for swapchain sync to avoid VUID-01779
+    // Timeline semaphore (m_vkTimelineSemaphore) is dedicated to Vulkan-CUDA interop
     uint32_t imageIndex;
     VkResult result = vkAcquireNextImageKHR(m_device,
                                             m_swapChain,
                                             std::numeric_limits<uint64_t>::max(),
-                                            m_vkPresentationSemaphore,
+                                            m_vkImageAcquiredSemaphores[currentFrameIdx],
                                             VK_NULL_HANDLE,
                                             &imageIndex);
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
         recreateSwapChain();
+        return;
     }
     else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
         throw std::runtime_error("Failed to acquire swap chain image!");
     }
+
+    // Reset the fence for this frame
+    vkResetFences(m_device, 1, &m_inFlightFences[currentFrameIdx]);
 
     updateUniformBuffer(imageIndex);
 
@@ -1663,6 +1683,8 @@ void VulkanBaseApp::drawFrame()
     std::vector<VkSemaphore>          waitSemaphores;
     std::vector<VkPipelineStageFlags> waitStages;
 
+    waitSemaphores.push_back(m_vkImageAcquiredSemaphores[currentFrameIdx]);
+    waitStages.push_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
     waitSemaphores.push_back(m_vkTimelineSemaphore);
     waitStages.push_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 
@@ -1675,26 +1697,30 @@ void VulkanBaseApp::drawFrame()
 
     std::vector<VkSemaphore> signalSemaphores;
     signalSemaphores.push_back(m_vkTimelineSemaphore);
+    signalSemaphores.push_back(m_vkRenderCompleteSemaphores[currentFrameIdx]);
     submitInfo.signalSemaphoreCount = (uint32_t)signalSemaphores.size();
     submitInfo.pSignalSemaphores    = signalSemaphores.data();
 
     VkTimelineSemaphoreSubmitInfo timelineInfo = {};
     timelineInfo.sType                         = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-    timelineInfo.waitSemaphoreValueCount       = 1;
-    timelineInfo.pWaitSemaphoreValues          = &waitValue;
-    timelineInfo.signalSemaphoreValueCount     = 1;
-    timelineInfo.pSignalSemaphoreValues        = &signalValue;
+    timelineInfo.waitSemaphoreValueCount       = 2;
+    uint64_t waitValues[]                      = {0, waitValue};
+    timelineInfo.pWaitSemaphoreValues          = waitValues;
+    timelineInfo.signalSemaphoreValueCount     = 2;
+    uint64_t signalValues[]                    = {signalValue, 0};
+    timelineInfo.pSignalSemaphoreValues        = signalValues;
 
     submitInfo.pNext = &timelineInfo;
 
-    if (vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
+    // Submit with fence to track when this frame completes
+    if (vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, m_inFlightFences[currentFrameIdx]) != VK_SUCCESS) {
         throw std::runtime_error("failed to submit draw command buffer!");
     }
 
     VkPresentInfoKHR presentInfo   = {};
     presentInfo.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores    = &m_vkPresentationSemaphore;
+    presentInfo.pWaitSemaphores    = &m_vkRenderCompleteSemaphores[currentFrameIdx];
 
     VkSwapchainKHR swapChains[] = {m_swapChain};
     presentInfo.swapchainCount  = 1;
