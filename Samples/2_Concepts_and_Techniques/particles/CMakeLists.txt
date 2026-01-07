@@ -39,10 +39,7 @@ if(${OpenGL_FOUND})
         # Add target for particles
         add_executable(particles particleSystem.cpp particleSystem_cuda.cu particles.cpp render_particles.cpp shaders.cpp)
 
-target_compile_options(particles PRIVATE
-    $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
-    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<BOOL:${MSVC}>>:-Xcompiler="/Zc:preprocessor">
-)
+target_compile_options(particles PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
 
 target_compile_features(particles PRIVATE cxx_std_17 cuda_std_17)
 

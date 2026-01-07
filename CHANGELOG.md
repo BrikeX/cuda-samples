@@ -1,5 +1,8 @@
 ## Changelog
 
+### CUDA 13.2
+* Added the MSVC compile flag `-Xcompiler=/Zc:preprocessor` in CMakeLists.txt to comply with CUDA13.2 CCCL. Previously, using the traditional preprocessor triggered the warning “MSVC/cl.exe with traditional preprocessor is used…”, which now leads to a build error.
+
 ### CUDA 13.1
 * Minor bug fixes and enhancements, no structural or functional changes
 
