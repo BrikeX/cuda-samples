@@ -41,6 +41,9 @@
 #include "thrust/iterator/zip_iterator.h"
 #include "thrust/sort.h"
 
+// for cuda::std::get
+#include <cuda/std/utility>
+
 namespace cg = cooperative_groups;
 #include "helper_math.h"
 #include "math_constants.h"
@@ -60,8 +63,8 @@ struct integrate_functor
 
     template <typename Tuple> __device__ void operator()(Tuple t)
     {
-        volatile float4 posData = thrust::get<0>(t);
-        volatile float4 velData = thrust::get<1>(t);
+        volatile float4 posData = cuda::std::get<0>(t);
+        volatile float4 velData = cuda::std::get<1>(t);
         float3          pos     = make_float3(posData.x, posData.y, posData.z);
         float3          vel     = make_float3(velData.x, velData.y, velData.z);
 
@@ -107,8 +110,8 @@ struct integrate_functor
         }
 
         // store new position and velocity
-        thrust::get<0>(t) = make_float4(pos, posData.w);
-        thrust::get<1>(t) = make_float4(vel, velData.w);
+        cuda::std::get<0>(t) = make_float4(pos, posData.w);
+        cuda::std::get<1>(t) = make_float4(vel, velData.w);
     }
 };
 

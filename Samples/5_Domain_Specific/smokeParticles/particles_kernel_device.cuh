@@ -40,6 +40,9 @@
 #include "thrust/iterator/zip_iterator.h"
 #include "thrust/sort.h"
 
+// for cuda::std::get
+#include <cuda/std/utility>
+
 cudaTextureObject_t noiseTex;
 // simulation parameters
 __constant__ SimParams cudaParams;
@@ -65,8 +68,8 @@ struct integrate_functor
 
     template <typename Tuple> __device__ void operator()(Tuple t)
     {
-        volatile float4 posData = thrust::get<2>(t);
-        volatile float4 velData = thrust::get<3>(t);
+        volatile float4 posData = cuda::std::get<2>(t);
+        volatile float4 velData = cuda::std::get<3>(t);
 
         float3 pos = make_float3(posData.x, posData.y, posData.z);
         float3 vel = make_float3(velData.x, velData.y, velData.z);
@@ -95,8 +98,8 @@ struct integrate_functor
         vel *= cudaParams.globalDamping;
 
         // store new position and velocity
-        thrust::get<0>(t) = make_float4(pos, age);
-        thrust::get<1>(t) = make_float4(vel, velData.w);
+        cuda::std::get<0>(t) = make_float4(pos, age);
+        cuda::std::get<1>(t) = make_float4(vel, velData.w);
     }
 };
 
@@ -111,10 +114,10 @@ struct calcDepth_functor
 
     template <typename Tuple> __host__ __device__ void operator()(Tuple t)
     {
-        volatile float4 p   = thrust::get<0>(t);
-        float           key = -dot(make_float3(p.x, p.y, p.z),
+        volatile float4 p    = cuda::std::get<0>(t);
+        float           key  = -dot(make_float3(p.x, p.y, p.z),
                          sortVector); // project onto sort vector
-        thrust::get<1>(t)   = key;
+        cuda::std::get<1>(t) = key;
     }
 };
 

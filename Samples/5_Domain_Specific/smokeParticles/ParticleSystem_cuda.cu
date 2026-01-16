@@ -127,9 +127,9 @@ extern "C"
         thrust::device_ptr<float4> d_oldVel(oldVel);
 
         thrust::for_each(
-            thrust::make_zip_iterator(thrust::make_tuple(d_newPos, d_newVel, d_oldPos, d_oldVel)),
-            thrust::make_zip_iterator(thrust::make_tuple(
-                d_newPos + numParticles, d_newVel + numParticles, d_oldPos + numParticles, d_oldVel + numParticles)),
+            thrust::make_zip_iterator(d_newPos, d_newVel, d_oldPos, d_oldVel),
+            thrust::make_zip_iterator(
+                d_newPos + numParticles, d_newVel + numParticles, d_oldPos + numParticles, d_oldVel + numParticles),
             integrate_functor(deltaTime, noiseTex));
     }
 
@@ -143,8 +143,8 @@ extern "C"
         thrust::device_ptr<float>  d_keys(keys);
         thrust::device_ptr<uint>   d_indices(indices);
 
-        thrust::for_each(thrust::make_zip_iterator(thrust::make_tuple(d_pos, d_keys)),
-                         thrust::make_zip_iterator(thrust::make_tuple(d_pos + numParticles, d_keys + numParticles)),
+        thrust::for_each(thrust::make_zip_iterator(d_pos, d_keys),
+                         thrust::make_zip_iterator(d_pos + numParticles, d_keys + numParticles),
                          calcDepth_functor(sortVector));
 
         thrust::sequence(d_indices, d_indices + numParticles);

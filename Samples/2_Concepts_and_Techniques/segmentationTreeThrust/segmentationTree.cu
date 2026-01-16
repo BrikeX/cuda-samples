@@ -505,13 +505,12 @@ private:
         thrust::device_ptr<uint>  dMinScannedEdges   = pools.uintEdges.get();
         thrust::device_ptr<float> dMinScannedWeights = pools.floatEdges.get();
 
-        thrust::inclusive_scan_by_key(
-            dEdgesFlags,
-            dEdgesFlags + edgesCount_,
-            thrust::make_zip_iterator(thrust::make_tuple(dWeights_, dEdges_)),
-            thrust::make_zip_iterator(thrust::make_tuple(dMinScannedWeights, dMinScannedEdges)),
-            thrust::greater_equal<uint>(),
-            thrust::minimum<thrust::tuple<float, uint>>());
+        thrust::inclusive_scan_by_key(dEdgesFlags,
+                                      dEdgesFlags + edgesCount_,
+                                      thrust::make_zip_iterator(dWeights_, dEdges_),
+                                      thrust::make_zip_iterator(dMinScannedWeights, dMinScannedEdges),
+                                      thrust::greater_equal<uint>(),
+                                      thrust::minimum<cuda::std::tuple<float, uint>>());
 
         // To make things clear.
         // Let "dEdgesFlags" denote groups of edges that
@@ -562,11 +561,10 @@ private:
 
         thrust::sequence(dClusteredVerticesIDs, dClusteredVerticesIDs + verticesCount_);
 
-        thrust::sort(thrust::make_zip_iterator(thrust::make_tuple(thrust::device_ptr<uint>(dSuccessors),
-                                                                  thrust::device_ptr<uint>(dClusteredVerticesIDs))),
-                     thrust::make_zip_iterator(
-                         thrust::make_tuple(thrust::device_ptr<uint>(dSuccessors + verticesCount_),
-                                            thrust::device_ptr<uint>(dClusteredVerticesIDs + verticesCount_))));
+        thrust::sort(thrust::make_zip_iterator(thrust::device_ptr<uint>(dSuccessors),
+                                               thrust::device_ptr<uint>(dClusteredVerticesIDs)),
+                     thrust::make_zip_iterator(thrust::device_ptr<uint>(dSuccessors + verticesCount_),
+                                               thrust::device_ptr<uint>(dClusteredVerticesIDs + verticesCount_)));
 
         // Mark those groups.
         thrust::device_ptr<uint> dVerticesFlags_ = pools.uintVertices.get();
@@ -653,9 +651,8 @@ private:
         // the step of the algorithm to that one. Hence we need to
         // preserve the structure of the original graph: neighbours and
         // weights should be grouped by vertex.
-        thrust::sort(thrust::make_zip_iterator(thrust::make_tuple(dNewStartpoints, dSurvivedEdgesIDs)),
-                     thrust::make_zip_iterator(
-                         thrust::make_tuple(dNewStartpoints + edgesCount_, dSurvivedEdgesIDs + edgesCount_)));
+        thrust::sort(thrust::make_zip_iterator(dNewStartpoints, dSurvivedEdgesIDs),
+                     thrust::make_zip_iterator(dNewStartpoints + edgesCount_, dSurvivedEdgesIDs + edgesCount_));
 
         // Find the group of contracted edges.
         uint *invalidEdgesPtr =

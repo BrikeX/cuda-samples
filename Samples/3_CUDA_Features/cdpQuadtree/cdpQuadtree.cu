@@ -30,6 +30,9 @@
 #include <thrust/host_vector.h>
 #include <thrust/random.h>
 
+// for cuda::std::tuple
+#include <cuda/std/tuple>
+
 namespace cg = cooperative_groups;
 #include <helper_cuda.h>
 
@@ -610,7 +613,7 @@ struct Random_generator
         return a;
     }
 
-    __host__ __device__ __forceinline__ thrust::tuple<float, float> operator()()
+    __host__ __device__ __forceinline__ cuda::std::tuple<float, float> operator()()
     {
 #ifdef __CUDA_ARCH__
         unsigned seed = hash(blockIdx.x * blockDim.x + threadIdx.x + count);
@@ -622,7 +625,7 @@ struct Random_generator
 #endif
         thrust::default_random_engine                    rng(seed);
         thrust::random::uniform_real_distribution<float> distrib;
-        return thrust::make_tuple(distrib(rng), distrib(rng));
+        return cuda::std::make_tuple(distrib(rng), distrib(rng));
     }
 };
 
@@ -644,9 +647,8 @@ bool cdpQuadtree(int warp_size)
 
     // Generate random points.
     Random_generator rnd;
-    thrust::generate(thrust::make_zip_iterator(thrust::make_tuple(x_d0.begin(), y_d0.begin())),
-                     thrust::make_zip_iterator(thrust::make_tuple(x_d0.end(), y_d0.end())),
-                     rnd);
+    thrust::generate(
+        thrust::make_zip_iterator(x_d0.begin(), y_d0.begin()), thrust::make_zip_iterator(x_d0.end(), y_d0.end()), rnd);
 
     // Host structures to analyze the device ones.
     Points points_init[2];
