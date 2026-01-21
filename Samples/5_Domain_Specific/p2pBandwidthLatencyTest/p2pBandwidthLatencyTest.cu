@@ -101,6 +101,54 @@ void printHelp(void)
     printf("--numElems=<NUM_OF_INT_ELEMS>  Number of integer elements to be used in p2p copy.\n");
 }
 
+///////////////////////////////////////////////////////////////////////////
+// Detect if cudaMemcpyPeerAsync will automatically fall back to
+// host-staged copies when P2P is disabled.
+//
+// We probe a single representative pair (device 0 -> device 1).
+// On a given system, confidential-computing (CC) and security
+// policies are uniform across GPUs, so if this pair is blocked
+// with cudaErrorNotSupported in P2P-off mode, it is reasonable
+// to assume all cross-GPU pairs behave the same.
+//
+// For a production application that must handle heterogeneous
+// environments, users may want to probe all device pairs.
+///////////////////////////////////////////////////////////////////////////
+bool detectFallback(int numGPUs)
+{
+    if (numGPUs <= 1)
+        return false;
+
+    cudaSetDevice(0);
+    int         *tmp0 = nullptr, *tmp1 = nullptr;
+    cudaStream_t s;
+    cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);
+
+    size_t testElems = 1; // 比如 1M ints (4MB)
+    cudaMalloc(&tmp0, testElems * sizeof(int));
+    cudaSetDevice(1);
+    cudaMalloc(&tmp1, testElems * sizeof(int));
+    cudaCheckError();
+
+    bool        needsFallback = false;
+    cudaError_t testErr       = cudaMemcpyPeerAsync(tmp1, 1, tmp0, 0, testElems * sizeof(int), s);
+
+    if (testErr == cudaErrorNotSupported) {
+        needsFallback = true;
+        printf("Note: cudaMemcpyPeerAsync reported '%s' - will use host-mediated copy when P2P is disabled\n",
+               cudaGetErrorString(testErr));
+        cudaGetLastError();
+    }
+
+    cudaStreamSynchronize(s);
+    cudaFree(tmp0);
+    cudaFree(tmp1);
+    cudaStreamDestroy(s);
+    cudaCheckError();
+
+    return needsFallback;
+}
+
 void checkP2Paccess(int numGPUs)
 {
     for (int i = 0; i < numGPUs; i++) {
@@ -128,7 +176,9 @@ void performP2PCopy(int         *dest,
                     int          num_elems,
                     int          repeat,
                     bool         p2paccess,
-                    cudaStream_t streamToRun)
+                    cudaStream_t streamToRun,
+                    bool         useFallback,
+                    int         *hostBuffer)
 {
     int blockSize = 0;
     int numBlocks = 0;
@@ -140,15 +190,33 @@ void performP2PCopy(int         *dest,
         for (int r = 0; r < repeat; r++) {
             copyp2p<<<numBlocks, blockSize, 0, streamToRun>>>((int4 *)dest, (int4 *)src, num_elems / 4);
         }
+        cudaCheckError();
+    }
+    else if (useFallback && srcDevice != destDevice) {
+        // Use host-mediated copy for cross-GPU transfers when cudaMemcpyPeerAsync is not supported
+        for (int r = 0; r < repeat; r++) {
+            cudaMemcpyAsync(hostBuffer, src, sizeof(int) * num_elems, cudaMemcpyDeviceToHost, streamToRun);
+            cudaMemcpyAsync(dest, hostBuffer, sizeof(int) * num_elems, cudaMemcpyHostToDevice, streamToRun);
+        }
+        cudaCheckError();
+    }
+    else if (useFallback && srcDevice == destDevice) {
+        // Same device copy
+        for (int r = 0; r < repeat; r++) {
+            cudaMemcpyAsync(dest, src, sizeof(int) * num_elems, cudaMemcpyDeviceToDevice, streamToRun);
+        }
+        cudaCheckError();
     }
     else {
+        // Use cudaMemcpyPeerAsync (original behavior)
         for (int r = 0; r < repeat; r++) {
             cudaMemcpyPeerAsync(dest, destDevice, src, srcDevice, sizeof(int) * num_elems, streamToRun);
         }
+        cudaCheckError();
     }
 }
 
-void outputBandwidthMatrix(int numElems, int numGPUs, bool p2p, P2PDataTransfer p2p_method)
+void outputBandwidthMatrix(int numElems, int numGPUs, bool p2p, P2PDataTransfer p2p_method, bool needsFallback)
 {
     int                  repeat = 5;
     volatile int        *flag   = NULL;
@@ -175,6 +243,16 @@ void outputBandwidthMatrix(int numElems, int numGPUs, bool p2p, P2PDataTransfer 
         cudaEventCreate(&start[d]);
         cudaCheckError();
         cudaEventCreate(&stop[d]);
+        cudaCheckError();
+    }
+
+    // Decide if fallback is needed based on global detection result and current test scenario
+    bool useFallback = (!p2p && needsFallback);
+    int *hostBuffer  = nullptr;
+
+    if (useFallback) {
+        // Allocate hostBuffer for this function's numElems
+        cudaHostAlloc((void **)&hostBuffer, sizeof(int) * numElems, cudaHostAllocDefault);
         cudaCheckError();
     }
 
@@ -215,16 +293,20 @@ void outputBandwidthMatrix(int numElems, int numGPUs, bool p2p, P2PDataTransfer 
 
             if (i == j) {
                 // Perform intra-GPU, D2D copies
-                performP2PCopy(buffers[i], i, buffersD2D[i], i, numElems, repeat, access, stream[i]);
+                performP2PCopy(
+                    buffers[i], i, buffersD2D[i], i, numElems, repeat, access, stream[i], useFallback, hostBuffer);
             }
             else {
                 if (p2p_method == P2P_WRITE) {
-                    performP2PCopy(buffers[j], j, buffers[i], i, numElems, repeat, access, stream[i]);
+                    performP2PCopy(
+                        buffers[j], j, buffers[i], i, numElems, repeat, access, stream[i], useFallback, hostBuffer);
                 }
                 else {
-                    performP2PCopy(buffers[i], i, buffers[j], j, numElems, repeat, access, stream[i]);
+                    performP2PCopy(
+                        buffers[i], i, buffers[j], j, numElems, repeat, access, stream[i], useFallback, hostBuffer);
                 }
             }
+            cudaCheckError();
 
             cudaEventRecord(stop[i], stream[i]);
             cudaCheckError();
@@ -284,11 +366,16 @@ void outputBandwidthMatrix(int numElems, int numGPUs, bool p2p, P2PDataTransfer 
         cudaCheckError();
     }
 
+    if (hostBuffer) {
+        cudaFreeHost(hostBuffer);
+        cudaCheckError();
+    }
+
     cudaFreeHost((void *)flag);
     cudaCheckError();
 }
 
-void outputBidirectionalBandwidthMatrix(int numElems, int numGPUs, bool p2p)
+void outputBidirectionalBandwidthMatrix(int numElems, int numGPUs, bool p2p, bool needsFallback)
 {
     int                  repeat = 5;
     volatile int        *flag   = NULL;
@@ -316,6 +403,16 @@ void outputBidirectionalBandwidthMatrix(int numElems, int numGPUs, bool p2p)
         cudaStreamCreateWithFlags(&stream0[d], cudaStreamNonBlocking);
         cudaCheckError();
         cudaStreamCreateWithFlags(&stream1[d], cudaStreamNonBlocking);
+        cudaCheckError();
+    }
+
+    // Decide if fallback is needed based on global detection result and current test scenario
+    bool useFallback = (!p2p && needsFallback);
+    int *hostBuffer  = nullptr;
+
+    if (useFallback) {
+        // Allocate hostBuffer for this function's numElems
+        cudaHostAlloc((void **)&hostBuffer, sizeof(int) * numElems, cudaHostAllocDefault);
         cudaCheckError();
     }
 
@@ -362,18 +459,22 @@ void outputBidirectionalBandwidthMatrix(int numElems, int numGPUs, bool p2p)
 
             if (i == j) {
                 // For intra-GPU perform 2 memcopies buffersD2D <-> buffers
-                performP2PCopy(buffers[i], i, buffersD2D[i], i, numElems, repeat, access, stream0[i]);
-                performP2PCopy(buffersD2D[i], i, buffers[i], i, numElems, repeat, access, stream1[i]);
+                performP2PCopy(
+                    buffers[i], i, buffersD2D[i], i, numElems, repeat, access, stream0[i], useFallback, hostBuffer);
+                performP2PCopy(
+                    buffersD2D[i], i, buffers[i], i, numElems, repeat, access, stream1[i], useFallback, hostBuffer);
             }
             else {
                 if (access && p2p_mechanism == SM) {
                     cudaSetDevice(j);
                 }
-                performP2PCopy(buffers[i], i, buffers[j], j, numElems, repeat, access, stream1[j]);
+                performP2PCopy(
+                    buffers[i], i, buffers[j], j, numElems, repeat, access, stream1[j], useFallback, hostBuffer);
                 if (access && p2p_mechanism == SM) {
                     cudaSetDevice(i);
                 }
-                performP2PCopy(buffers[j], j, buffers[i], i, numElems, repeat, access, stream0[i]);
+                performP2PCopy(
+                    buffers[j], j, buffers[i], i, numElems, repeat, access, stream0[i], useFallback, hostBuffer);
             }
 
             // Notify stream0 that stream1 is complete and record the time of
@@ -439,11 +540,16 @@ void outputBidirectionalBandwidthMatrix(int numElems, int numGPUs, bool p2p)
         cudaCheckError();
     }
 
+    if (hostBuffer) {
+        cudaFreeHost(hostBuffer);
+        cudaCheckError();
+    }
+
     cudaFreeHost((void *)flag);
     cudaCheckError();
 }
 
-void outputLatencyMatrix(int numGPUs, bool p2p, P2PDataTransfer p2p_method)
+void outputLatencyMatrix(int numGPUs, bool p2p, P2PDataTransfer p2p_method, bool needsFallback)
 {
     int                  repeat    = 100;
     int                  numElems  = 4; // perform 1-int4 transfer.
@@ -475,6 +581,16 @@ void outputLatencyMatrix(int numGPUs, bool p2p, P2PDataTransfer p2p_method)
         cudaEventCreate(&start[d]);
         cudaCheckError();
         cudaEventCreate(&stop[d]);
+        cudaCheckError();
+    }
+
+    // Decide if fallback is needed based on global detection result and current test scenario
+    bool useFallback = (!p2p && needsFallback);
+    int *hostBuffer  = nullptr;
+
+    if (useFallback) {
+        // Allocate hostBuffer for this function's numElems
+        cudaHostAlloc((void **)&hostBuffer, sizeof(int) * numElems, cudaHostAllocDefault);
         cudaCheckError();
     }
 
@@ -513,14 +629,17 @@ void outputLatencyMatrix(int numGPUs, bool p2p, P2PDataTransfer p2p_method)
             sdkResetTimer(&stopWatch);
             if (i == j) {
                 // Perform intra-GPU, D2D copies
-                performP2PCopy(buffers[i], i, buffersD2D[i], i, numElems, repeat, access, stream[i]);
+                performP2PCopy(
+                    buffers[i], i, buffersD2D[i], i, numElems, repeat, access, stream[i], useFallback, hostBuffer);
             }
             else {
                 if (p2p_method == P2P_WRITE) {
-                    performP2PCopy(buffers[j], j, buffers[i], i, numElems, repeat, access, stream[i]);
+                    performP2PCopy(
+                        buffers[j], j, buffers[i], i, numElems, repeat, access, stream[i], useFallback, hostBuffer);
                 }
                 else {
-                    performP2PCopy(buffers[i], i, buffers[j], j, numElems, repeat, access, stream[i]);
+                    performP2PCopy(
+                        buffers[i], i, buffers[j], j, numElems, repeat, access, stream[i], useFallback, hostBuffer);
                 }
             }
             float cpu_time_ms = sdkGetTimerValue(&stopWatch);
@@ -597,6 +716,11 @@ void outputLatencyMatrix(int numGPUs, bool p2p, P2PDataTransfer p2p_method)
 
     sdkDeleteTimer(&stopWatch);
 
+    if (hostBuffer) {
+        cudaFreeHost(hostBuffer);
+        cudaCheckError();
+    }
+
     cudaFreeHost((void *)flag);
     cudaCheckError();
 }
@@ -645,6 +769,9 @@ int main(int argc, char **argv)
 
     checkP2Paccess(numGPUs);
 
+    // Environment detection: One-time check if cudaMemcpyPeerAsync is supported when P2P is disabled
+    bool needsFallback = detectFallback(numGPUs);
+
     // Check peer-to-peer connectivity
     printf("P2P Connectivity Matrix\n");
     printf("     D\\D");
@@ -671,25 +798,25 @@ int main(int argc, char **argv)
     }
 
     printf("Unidirectional P2P=Disabled Bandwidth Matrix (GB/s)\n");
-    outputBandwidthMatrix(numElems, numGPUs, false, P2P_WRITE);
+    outputBandwidthMatrix(numElems, numGPUs, false, P2P_WRITE, needsFallback);
     printf("Unidirectional P2P=Enabled Bandwidth (P2P Writes) Matrix (GB/s)\n");
-    outputBandwidthMatrix(numElems, numGPUs, true, P2P_WRITE);
+    outputBandwidthMatrix(numElems, numGPUs, true, P2P_WRITE, needsFallback);
     if (p2p_method == P2P_READ) {
         printf("Unidirectional P2P=Enabled Bandwidth (P2P Reads) Matrix (GB/s)\n");
-        outputBandwidthMatrix(numElems, numGPUs, true, p2p_method);
+        outputBandwidthMatrix(numElems, numGPUs, true, p2p_method, needsFallback);
     }
     printf("Bidirectional P2P=Disabled Bandwidth Matrix (GB/s)\n");
-    outputBidirectionalBandwidthMatrix(numElems, numGPUs, false);
+    outputBidirectionalBandwidthMatrix(numElems, numGPUs, false, needsFallback);
     printf("Bidirectional P2P=Enabled Bandwidth Matrix (GB/s)\n");
-    outputBidirectionalBandwidthMatrix(numElems, numGPUs, true);
+    outputBidirectionalBandwidthMatrix(numElems, numGPUs, true, needsFallback);
 
     printf("P2P=Disabled Latency Matrix (us)\n");
-    outputLatencyMatrix(numGPUs, false, P2P_WRITE);
+    outputLatencyMatrix(numGPUs, false, P2P_WRITE, needsFallback);
     printf("P2P=Enabled Latency (P2P Writes) Matrix (us)\n");
-    outputLatencyMatrix(numGPUs, true, P2P_WRITE);
+    outputLatencyMatrix(numGPUs, true, P2P_WRITE, needsFallback);
     if (p2p_method == P2P_READ) {
         printf("P2P=Enabled Latency (P2P Reads) Matrix (us)\n");
-        outputLatencyMatrix(numGPUs, true, p2p_method);
+        outputLatencyMatrix(numGPUs, true, p2p_method, needsFallback);
     }
 
     printf("\nNOTE: The CUDA Samples are not meant for performance measurements. "
