@@ -27,6 +27,8 @@ if(MSVC)
     add_compile_options($<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>)
 endif()
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Include installation configuration before processing samples
 include(cmake/InstallSamples.cmake)
 
