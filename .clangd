@@ -1,0 +1,11 @@
+CompileFlags:
+  Remove:
+    - -forward-unknown-to-host-compiler
+    - --options-file
+    - --extended-lambda
+    - --generate-code=*
+    - -Xcompiler=*
+    - -rdc=true
+    - -G
+    - -Wno-deprecated-gpu-targets
+    - -lineinfo
