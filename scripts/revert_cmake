@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Revert local CMakeLists.txt arch changes
+#
+# Usage:
+#   ./scripts/revert_cmake
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+cd "${PROJECT_ROOT}"
+
+echo "=== Reverting CMakeLists.txt arch changes ==="
+git checkout -- '**CMakeLists.txt' 'CMakeLists.txt' 2>/dev/null || true
+echo "Done."

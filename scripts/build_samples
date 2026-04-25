@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Usage:
+#   ./scripts/build_samples                # Debug build, auto-detect GPU arch
+#   ./scripts/build_samples Release        # Release build
+#   ./scripts/build_samples Release 80     # Release build, arch 80
+#   ./scripts/build_samples --update-arch  # also update arch in all CMakeLists.txt
+set -euo pipefail
+
+UPDATE_ARCH=false
+args=()
+for arg in "$@"; do
+  case "$arg" in
+  --update-arch) UPDATE_ARCH=true ;;
+  *) args+=("$arg") ;;
+  esac
+done
+
+BUILD_TYPE="${args[0]:-Debug}"
+if [ -z "${args[1]:-}" ]; then
+  DEFAULT_ARCH="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d '.')"
+  if [ -z "${DEFAULT_ARCH}" ]; then
+    echo "Error: Failed to detect GPU architecture. Is nvidia-smi available?" >&2
+    echo "You can specify it manually: ./scripts/build_samples [BuildType] <arch>" >&2
+    exit 1
+  fi
+fi
+CUDA_ARCH="${args[1]:-${DEFAULT_ARCH}}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+BUILD_DIR="${PROJECT_ROOT}/build"
+NPROC="$(nproc)"
+
+echo "=== CUDA Samples Build ==="
+echo "  Project root : ${PROJECT_ROOT}"
+echo "  Build dir    : ${BUILD_DIR}"
+echo "  Build type   : ${BUILD_TYPE}"
+echo "  CUDA arch    : ${CUDA_ARCH}"
+echo "  Update arch  : ${UPDATE_ARCH}"
+echo "  Parallel jobs: ${NPROC}"
+echo ""
+
+if [ "${UPDATE_ARCH}" = true ]; then
+  echo "Updating CUDA architectures to ${CUDA_ARCH}..."
+  python3 "${SCRIPT_DIR}/update_cuda_arch.py" --cuda-arch "${CUDA_ARCH}"
+  echo ""
+fi
+
+mkdir -p "${BUILD_DIR}"
+cd "${BUILD_DIR}"
+
+CMAKE_ARGS=(
+  -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
+)
+if [ "${BUILD_TYPE}" = "Debug" ]; then
+  CMAKE_ARGS+=(-DENABLE_CUDA_DEBUG=ON)
+fi
+
+cmake "${PROJECT_ROOT}" "${CMAKE_ARGS[@]}"
+cmake --build . -j"${NPROC}" -- -k || BUILD_EXIT=$?
+BUILD_EXIT="${BUILD_EXIT:-0}"
+
+if [ "${UPDATE_ARCH}" = true ]; then
+  "${SCRIPT_DIR}/revert_cmake"
+fi
+
+exit "${BUILD_EXIT}"
