@@ -6,3 +6,4 @@ settings.json
 launch.json
 .cache/
 compile_commands.json
+__pycache__/
